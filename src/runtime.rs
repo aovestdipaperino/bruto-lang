@@ -402,6 +402,198 @@ pub fn emit_runtime<'ctx>(context: &'ctx Context, module: &Module<'ctx>) {
             .try_as_basic_value().basic().unwrap();
         b.build_return(Some(&r)).unwrap();
     }
+
+    // ── libc externs for string ops ────────────────────────
+    let memcpy_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false);
+    module.add_function("memcpy", memcpy_ty, None);
+
+    let snprintf_ty = i32_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), ptr_ty.into()], true);
+    module.add_function("snprintf", snprintf_ty, None);
+
+    let strstr_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+    module.add_function("strstr", strstr_ty, None);
+
+    let atoll_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+    module.add_function("atoll", atoll_ty, None);
+
+    // bruto_str_copy(s: ptr, index: i64, count: i64) -> ptr
+    // copy(s, index, count) — 1-based index
+    {
+        let fn_ty = ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), i64_ty.into()], false);
+        let func = module.add_function("bruto_str_copy", fn_ty, None);
+        let bb = context.append_basic_block(func, "entry");
+        let b = context.create_builder();
+        b.position_at_end(bb);
+        let s = func.get_nth_param(0).unwrap().into_pointer_value();
+        let index = func.get_nth_param(1).unwrap().into_int_value();
+        let count = func.get_nth_param(2).unwrap().into_int_value();
+        // start = index - 1
+        let start = b.build_int_sub(index, i64_ty.const_int(1, false), "start").unwrap();
+        // allocate count+1 bytes
+        let buf_size = b.build_int_add(count, i64_ty.const_int(1, false), "bsz").unwrap();
+        let malloc = module.get_function("malloc").unwrap();
+        let buf = b.build_call(malloc, &[buf_size.into()], "buf").unwrap()
+            .try_as_basic_value().basic().unwrap().into_pointer_value();
+        // src = s + start
+        let src = unsafe { b.build_in_bounds_gep(context.i8_type(), s, &[start], "src").unwrap() };
+        let memcpy = module.get_function("memcpy").unwrap();
+        b.build_call(memcpy, &[buf.into(), src.into(), count.into()], "").unwrap();
+        // null-terminate: buf[count] = 0
+        let end = unsafe { b.build_in_bounds_gep(context.i8_type(), buf, &[count], "end").unwrap() };
+        b.build_store(end, context.i8_type().const_int(0, false)).unwrap();
+        b.build_return(Some(&buf)).unwrap();
+    }
+
+    // bruto_str_pos(substr: ptr, s: ptr) -> i64
+    // pos(substr, s) — returns 1-based position, 0 if not found
+    {
+        let fn_ty = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let func = module.add_function("bruto_str_pos", fn_ty, None);
+        let bb = context.append_basic_block(func, "entry");
+        let b = context.create_builder();
+        b.position_at_end(bb);
+        let substr = func.get_nth_param(0).unwrap().into_pointer_value();
+        let s = func.get_nth_param(1).unwrap().into_pointer_value();
+        let strstr = module.get_function("strstr").unwrap();
+        let found = b.build_call(strstr, &[s.into(), substr.into()], "found").unwrap()
+            .try_as_basic_value().basic().unwrap().into_pointer_value();
+        let is_null = b.build_is_null(found, "null").unwrap();
+        let found_bb = context.append_basic_block(func, "found");
+        let not_found_bb = context.append_basic_block(func, "not_found");
+        b.build_conditional_branch(is_null, not_found_bb, found_bb).unwrap();
+
+        b.position_at_end(found_bb);
+        let s_int = b.build_ptr_to_int(s, i64_ty, "si").unwrap();
+        let f_int = b.build_ptr_to_int(found, i64_ty, "fi").unwrap();
+        let diff = b.build_int_sub(f_int, s_int, "diff").unwrap();
+        let pos = b.build_int_add(diff, i64_ty.const_int(1, false), "pos").unwrap(); // 1-based
+        b.build_return(Some(&pos)).unwrap();
+
+        b.position_at_end(not_found_bb);
+        b.build_return(Some(&i64_ty.const_int(0, false))).unwrap();
+    }
+
+    // bruto_str_delete(s: ptr, index: i64, count: i64) -> ptr
+    {
+        let fn_ty = ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), i64_ty.into()], false);
+        let func = module.add_function("bruto_str_delete", fn_ty, None);
+        let bb = context.append_basic_block(func, "entry");
+        let b = context.create_builder();
+        b.position_at_end(bb);
+        let s = func.get_nth_param(0).unwrap().into_pointer_value();
+        let index = func.get_nth_param(1).unwrap().into_int_value();
+        let count = func.get_nth_param(2).unwrap().into_int_value();
+        let strlen = module.get_function("strlen").unwrap();
+        let slen = b.build_call(strlen, &[s.into()], "slen").unwrap()
+            .try_as_basic_value().basic().unwrap().into_int_value();
+        // start = index - 1; tail_start = start + count; tail_len = slen - tail_start
+        let start = b.build_int_sub(index, i64_ty.const_int(1, false), "start").unwrap();
+        let tail_start = b.build_int_add(start, count, "ts").unwrap();
+        let tail_len = b.build_int_sub(slen, tail_start, "tl").unwrap();
+        // new_len = start + tail_len
+        let new_len = b.build_int_add(start, tail_len, "nl").unwrap();
+        let buf_size = b.build_int_add(new_len, i64_ty.const_int(1, false), "bsz").unwrap();
+        let malloc = module.get_function("malloc").unwrap();
+        let buf = b.build_call(malloc, &[buf_size.into()], "buf").unwrap()
+            .try_as_basic_value().basic().unwrap().into_pointer_value();
+        // copy first part
+        let memcpy = module.get_function("memcpy").unwrap();
+        b.build_call(memcpy, &[buf.into(), s.into(), start.into()], "").unwrap();
+        // copy tail
+        let buf_tail = unsafe { b.build_in_bounds_gep(context.i8_type(), buf, &[start], "bt").unwrap() };
+        let s_tail = unsafe { b.build_in_bounds_gep(context.i8_type(), s, &[tail_start], "st").unwrap() };
+        let tail_plus1 = b.build_int_add(tail_len, i64_ty.const_int(1, false), "tp1").unwrap(); // include null
+        b.build_call(memcpy, &[buf_tail.into(), s_tail.into(), tail_plus1.into()], "").unwrap();
+        b.build_return(Some(&buf)).unwrap();
+    }
+
+    // bruto_str_insert(source: ptr, s: ptr, index: i64) -> ptr
+    {
+        let fn_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false);
+        let func = module.add_function("bruto_str_insert", fn_ty, None);
+        let bb = context.append_basic_block(func, "entry");
+        let b = context.create_builder();
+        b.position_at_end(bb);
+        let source = func.get_nth_param(0).unwrap().into_pointer_value();
+        let s = func.get_nth_param(1).unwrap().into_pointer_value();
+        let index = func.get_nth_param(2).unwrap().into_int_value();
+        let strlen = module.get_function("strlen").unwrap();
+        let slen = b.build_call(strlen, &[s.into()], "slen").unwrap()
+            .try_as_basic_value().basic().unwrap().into_int_value();
+        let src_len = b.build_call(strlen, &[source.into()], "srclen").unwrap()
+            .try_as_basic_value().basic().unwrap().into_int_value();
+        let total = b.build_int_add(slen, src_len, "tot").unwrap();
+        let buf_size = b.build_int_add(total, i64_ty.const_int(1, false), "bsz").unwrap();
+        let malloc = module.get_function("malloc").unwrap();
+        let buf = b.build_call(malloc, &[buf_size.into()], "buf").unwrap()
+            .try_as_basic_value().basic().unwrap().into_pointer_value();
+        let pos = b.build_int_sub(index, i64_ty.const_int(1, false), "pos").unwrap();
+        // copy s[0..pos]
+        let memcpy = module.get_function("memcpy").unwrap();
+        b.build_call(memcpy, &[buf.into(), s.into(), pos.into()], "").unwrap();
+        // copy source
+        let buf_mid = unsafe { b.build_in_bounds_gep(context.i8_type(), buf, &[pos], "bm").unwrap() };
+        b.build_call(memcpy, &[buf_mid.into(), source.into(), src_len.into()], "").unwrap();
+        // copy s[pos..] including null
+        let buf_tail = unsafe {
+            let off = b.build_int_add(pos, src_len, "off").unwrap();
+            b.build_in_bounds_gep(context.i8_type(), buf, &[off], "btail").unwrap()
+        };
+        let s_tail = unsafe { b.build_in_bounds_gep(context.i8_type(), s, &[pos], "stail").unwrap() };
+        let tail_len = b.build_int_sub(slen, pos, "tlen").unwrap();
+        let tail_plus1 = b.build_int_add(tail_len, i64_ty.const_int(1, false), "tp1").unwrap();
+        b.build_call(memcpy, &[buf_tail.into(), s_tail.into(), tail_plus1.into()], "").unwrap();
+        b.build_return(Some(&buf)).unwrap();
+    }
+
+    // bruto_int_to_str(x: i64) -> ptr
+    {
+        let fn_ty = ptr_ty.fn_type(&[i64_ty.into()], false);
+        let func = module.add_function("bruto_int_to_str", fn_ty, None);
+        let bb = context.append_basic_block(func, "entry");
+        let b = context.create_builder();
+        b.position_at_end(bb);
+        let x = func.get_first_param().unwrap().into_int_value();
+        let malloc = module.get_function("malloc").unwrap();
+        let buf = b.build_call(malloc, &[i64_ty.const_int(32, false).into()], "buf").unwrap()
+            .try_as_basic_value().basic().unwrap().into_pointer_value();
+        let snprintf = module.get_function("snprintf").unwrap();
+        let fmt = b.build_global_string_ptr("%lld", "itoa_fmt").unwrap();
+        b.build_call(snprintf, &[buf.into(), i64_ty.const_int(32, false).into(), fmt.as_pointer_value().into(), x.into()], "").unwrap();
+        b.build_return(Some(&buf)).unwrap();
+    }
+
+    // bruto_real_to_str(x: f64) -> ptr
+    {
+        let f64_ty = context.f64_type();
+        let fn_ty = ptr_ty.fn_type(&[f64_ty.into()], false);
+        let func = module.add_function("bruto_real_to_str", fn_ty, None);
+        let bb = context.append_basic_block(func, "entry");
+        let b = context.create_builder();
+        b.position_at_end(bb);
+        let x = func.get_first_param().unwrap().into_float_value();
+        let malloc = module.get_function("malloc").unwrap();
+        let buf = b.build_call(malloc, &[i64_ty.const_int(64, false).into()], "buf").unwrap()
+            .try_as_basic_value().basic().unwrap().into_pointer_value();
+        let snprintf = module.get_function("snprintf").unwrap();
+        let fmt = b.build_global_string_ptr("%.10g", "ftoa_fmt").unwrap();
+        b.build_call(snprintf, &[buf.into(), i64_ty.const_int(64, false).into(), fmt.as_pointer_value().into(), x.into()], "").unwrap();
+        b.build_return(Some(&buf)).unwrap();
+    }
+
+    // bruto_str_to_int(s: ptr) -> i64
+    {
+        let fn_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let func = module.add_function("bruto_str_to_int", fn_ty, None);
+        let bb = context.append_basic_block(func, "entry");
+        let b = context.create_builder();
+        b.position_at_end(bb);
+        let s = func.get_first_param().unwrap().into_pointer_value();
+        let atoll = module.get_function("atoll").unwrap();
+        let r = b.build_call(atoll, &[s.into()], "val").unwrap()
+            .try_as_basic_value().basic().unwrap();
+        b.build_return(Some(&r)).unwrap();
+    }
 }
 
 /// Helper: emit a `bruto_capture_write_*` function that fprintf's a single
