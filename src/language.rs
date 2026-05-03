@@ -14,6 +14,28 @@ pub struct BuildResult {
     pub console_capture_path: String,
 }
 
+/// Status reported by [`BuildJob::poll`] each tick of the IDE's
+/// progress dialog. `Pending` keeps the job alive; `Done`/`Failed`
+/// terminate the dialog.
+pub enum BuildPhase {
+    /// Still working — the IDE redraws its progress dialog and polls
+    /// again on the next tick. The string is shown to the user.
+    Pending(String),
+    Done(BuildResult),
+    Failed(String),
+}
+
+/// A poll-driven build that the IDE drives cooperatively from its
+/// modal progress dialog. Implementations chunk their work so heavy
+/// phases (linking) can be polled with `try_wait` without blocking
+/// the UI; cancelling = dropping the job, so the impl's `Drop` should
+/// kill any spawned child processes.
+pub trait BuildJob {
+    /// Advance one step. The IDE polls this each redraw cycle until
+    /// it returns `Done` or `Failed`.
+    fn poll(&mut self) -> BuildPhase;
+}
+
 pub trait Language {
     /// Display name shown in the About dialog (e.g. "Mini-Pascal").
     fn name(&self) -> &str;
@@ -27,14 +49,26 @@ pub trait Language {
     /// Create a syntax highlighter for the turbo-vision Editor.
     fn create_highlighter(&self) -> Box<dyn turbo_vision::views::syntax::SyntaxHighlighter>;
 
-    /// Compile source text into a native executable with debug info.
-    ///
-    /// The implementation must:
-    /// 1. Save the source to a file on disk (so lldb can resolve DWARF references)
-    /// 2. Parse and compile the source
-    /// 3. Emit an executable with DWARF debug metadata
-    /// 4. Return paths to the executable, source file, and console capture file
-    fn build(&self, source: &str) -> Result<BuildResult, String>;
+    /// Build the source as a poll-driven state machine. The IDE
+    /// polls this from its progress dialog until [`BuildPhase::Done`]
+    /// or [`BuildPhase::Failed`] is returned. Implementations should
+    /// chunk work so the slow phases (linking) are pollable via
+    /// `Child::try_wait` rather than blocking calls; the impl's
+    /// `Drop` should kill any subprocesses to make Cancel real.
+    fn build_job(&self, source: &str) -> Box<dyn BuildJob>;
+
+    /// Convenience: drive `build_job` to completion synchronously.
+    /// Used by callers that don't want progress info (CLI mode).
+    fn build(&self, source: &str) -> Result<BuildResult, String> {
+        let mut job = self.build_job(source);
+        loop {
+            match job.poll() {
+                BuildPhase::Pending(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                BuildPhase::Done(r) => return Ok(r),
+                BuildPhase::Failed(e) => return Err(e),
+            }
+        }
+    }
 
     /// Return the set of 1-based line numbers where a breakpoint can validly
     /// be set (lines that produce executable code).  Used after a successful
