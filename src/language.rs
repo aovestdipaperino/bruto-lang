@@ -57,6 +57,14 @@ pub trait Language {
     /// `Drop` should kill any subprocesses to make Cancel real.
     fn build_job(&self, source: &str) -> Box<dyn BuildJob>;
 
+    /// Like [`build_job`] but with an explicit on-disk path for the
+    /// main source file. Languages that resolve imports (Pascal `uses`)
+    /// from sibling files override this; otherwise the default just
+    /// forwards to [`build_job`] and ignores the path.
+    fn build_job_at(&self, source: &str, _source_path: Option<&std::path::Path>) -> Box<dyn BuildJob> {
+        self.build_job(source)
+    }
+
     /// Convenience: drive `build_job` to completion synchronously.
     /// Used by callers that don't want progress info (CLI mode).
     fn build(&self, source: &str) -> Result<BuildResult, String> {
