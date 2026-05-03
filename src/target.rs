@@ -19,6 +19,18 @@ use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::values::PointerValue;
 
+/// Path the compiled program writes its console output to. Codegen
+/// embeds this string in the IR (see `bruto_capture_open`) and the
+/// IDE's debugger reader tails the same file. Resolved at the
+/// codegen-binary build time via [`std::env::temp_dir`] so the same
+/// code path works for `/tmp` on Unix and `%TEMP%` on Windows.
+pub fn console_capture_path() -> String {
+    std::env::temp_dir()
+        .join("turbo_pascal_console.txt")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// One of the three standard streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stdio {
