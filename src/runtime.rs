@@ -1113,8 +1113,8 @@ pub fn emit_runtime<'ctx>(context: &'ctx Context, module: &Module<'ctx>) {
             .into_pointer_value();
         b.build_store(buf, context.i8_type().const_int(0, false))
             .unwrap();
-        let stdin_global = module.get_global("__stdinp").unwrap_or_else(|| {
-            let g = module.add_global(ptr_ty, None, "__stdinp");
+        let stdin_global = module.get_global(crate::target::STDIN_SYM).unwrap_or_else(|| {
+            let g = module.add_global(ptr_ty, None, crate::target::STDIN_SYM);
             g.set_externally_initialized(true);
             g.set_linkage(inkwell::module::Linkage::External);
             g
@@ -1946,8 +1946,8 @@ pub fn emit_runtime<'ctx>(context: &'ctx Context, module: &Module<'ctx>) {
         let hi = func.get_nth_param(2).unwrap().into_int_value();
         let val = func.get_nth_param(3).unwrap().into_int_value();
         // fprintf(stderr, "Runtime error: range check failed at line %lld: %lld not in %lld..%lld\n", ...)
-        let stderr_g = module.get_global("__stderrp").unwrap_or_else(|| {
-            let g = module.add_global(ptr_ty, None, "__stderrp");
+        let stderr_g = module.get_global(crate::target::STDERR_SYM).unwrap_or_else(|| {
+            let g = module.add_global(ptr_ty, None, crate::target::STDERR_SYM);
             g.set_externally_initialized(true);
             g.set_linkage(inkwell::module::Linkage::External);
             g
@@ -1994,8 +1994,8 @@ pub fn emit_runtime<'ctx>(context: &'ctx Context, module: &Module<'ctx>) {
         let b = context.create_builder();
         b.position_at_end(bb);
         let line = func.get_first_param().unwrap().into_int_value();
-        let stderr_g = module.get_global("__stderrp").unwrap_or_else(|| {
-            let g = module.add_global(ptr_ty, None, "__stderrp");
+        let stderr_g = module.get_global(crate::target::STDERR_SYM).unwrap_or_else(|| {
+            let g = module.add_global(ptr_ty, None, crate::target::STDERR_SYM);
             g.set_externally_initialized(true);
             g.set_linkage(inkwell::module::Linkage::External);
             g
