@@ -61,7 +61,11 @@ pub trait Language {
     /// main source file. Languages that resolve imports (Pascal `uses`)
     /// from sibling files override this; otherwise the default just
     /// forwards to [`build_job`] and ignores the path.
-    fn build_job_at(&self, source: &str, _source_path: Option<&std::path::Path>) -> Box<dyn BuildJob> {
+    fn build_job_at(
+        &self,
+        source: &str,
+        _source_path: Option<&std::path::Path>,
+    ) -> Box<dyn BuildJob> {
         self.build_job(source)
     }
 
