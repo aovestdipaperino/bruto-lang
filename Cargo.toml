@@ -9,4 +9,4 @@ license = "MIT"
 
 [dependencies]
 inkwell = { version = "0.8.0", features = ["llvm18-1"] }
-turbo-vision = "1.2"
+turbo-vision = "1.3"
