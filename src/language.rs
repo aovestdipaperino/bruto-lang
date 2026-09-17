@@ -1,8 +1,8 @@
-/// The Language trait abstracts a programming language for the IDE.
-///
-/// Implement this trait to add support for a new language. The IDE calls
-/// these methods to get syntax highlighting, build executables, and
-/// display language-specific information.
+//! The Language trait abstracts a programming language for the IDE.
+//!
+//! Implement this trait to add support for a new language. The IDE calls
+//! these methods to get syntax highlighting, build executables, and
+//! display language-specific information.
 
 /// Result of a successful build.
 pub struct BuildResult {
