@@ -12,6 +12,11 @@ pub struct BuildResult {
     pub source_path: String,
     /// Path to the console output capture file (program writes here via compiled-in code).
     pub console_capture_path: String,
+    /// `<exe>.bruto-prof`, written by the program at exit. `Some` only for
+    /// profile builds.
+    pub profile_path: Option<String>,
+    /// `<exe>.bruto-prof-map`, written by codegen. `Some` only for profile builds.
+    pub profile_map_path: Option<String>,
 }
 
 /// Status reported by [`BuildJob::poll`] each tick of the IDE's
@@ -69,6 +74,19 @@ pub trait Language {
         self.build_job(source)
     }
 
+    /// Like [`build_job_at`] but with profiling instrumentation compiled
+    /// in. The resulting [`BuildResult`] carries `profile_path` and
+    /// `profile_map_path`. Default: a job that fails immediately, for
+    /// languages without a profiler.
+    fn profile_job_at(
+        &self,
+        source: &str,
+        source_path: Option<&std::path::Path>,
+    ) -> Box<dyn BuildJob> {
+        let _ = (source, source_path);
+        Box::new(UnsupportedJob)
+    }
+
     /// Convenience: drive `build_job` to completion synchronously.
     /// Used by callers that don't want progress info (CLI mode).
     fn build(&self, source: &str) -> Result<BuildResult, String> {
@@ -82,6 +100,14 @@ pub trait Language {
         }
     }
 
+    /// Read the profile written by a run of a `profile_job_at` build.
+    fn load_profile(&self, result: &BuildResult) -> Result<crate::profile::Profile, String> {
+        let (Some(p), Some(m)) = (&result.profile_path, &result.profile_map_path) else {
+            return Err("this build was not a profile build".into());
+        };
+        crate::profile::Profile::load(p, m)
+    }
+
     /// Return the set of 1-based line numbers where a breakpoint can validly
     /// be set (lines that produce executable code).  Used after a successful
     /// build to snap user-placed breakpoints to the nearest valid line.
@@ -89,5 +115,14 @@ pub trait Language {
     fn valid_breakpoint_lines(&self, source: &str) -> std::collections::HashSet<usize> {
         let _ = source;
         (1..=source.lines().count()).collect()
+    }
+}
+
+/// `BuildJob` for languages that do not implement a feature.
+struct UnsupportedJob;
+
+impl BuildJob for UnsupportedJob {
+    fn poll(&mut self) -> BuildPhase {
+        BuildPhase::Failed("profiling is not supported for this language".into())
     }
 }
