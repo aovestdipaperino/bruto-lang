@@ -146,6 +146,11 @@ impl Profile {
                 2 => ProfileKind::Line,
                 k => return Err(format!("profile file: bad node kind {k}")),
             };
+            if kind != entry.kind {
+                return Err(format!(
+                    "profile file: node {i} kind does not match map entry {loc}"
+                ));
+            }
             let parent = if parent_raw == u32::MAX {
                 None
             } else if (parent_raw as usize) < count {
@@ -162,6 +167,25 @@ impl Profile {
                 self_ns,
                 total_ns,
             });
+        }
+        for i in 0..nodes.len() {
+            let mut cur = i;
+            let mut steps = 0usize;
+            loop {
+                match nodes[cur].parent {
+                    None => break,
+                    Some(p) => {
+                        if p == cur {
+                            return Err(format!("profile file: cyclic parent chain at node {i}"));
+                        }
+                        cur = p;
+                        steps += 1;
+                        if steps > count {
+                            return Err(format!("profile file: cyclic parent chain at node {i}"));
+                        }
+                    }
+                }
+            }
         }
         Ok(Profile {
             elapsed_ns,
@@ -294,6 +318,46 @@ mod tests {
         assert_eq!(t.get(&5), Some(&(300, 5)));
         assert_eq!(t.get(&12), Some(&(600, 5)));
         assert_eq!(t.get(&3), None, "routine rows are not lines");
+    }
+
+    #[test]
+    fn rejects_cyclic_parent_chain() {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"BPRF");
+        le_u32(&mut v, 1);
+        le_u32(&mut v, 0);
+        le_u64(&mut v, 1_000);
+        le_u32(&mut v, 2);
+        node(&mut v, 1, 1, 1, 1, 100, 1_000); // node 0, parent 1
+        node(&mut v, 1, 4, 0, 1, 100, 1_000); // node 1, parent 0
+        let err = Profile::from_bytes(&v, &sample_map()).unwrap_err();
+        assert!(err.contains("cyclic parent chain"), "{err}");
+    }
+
+    #[test]
+    fn rejects_self_parent() {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"BPRF");
+        le_u32(&mut v, 1);
+        le_u32(&mut v, 0);
+        le_u64(&mut v, 1_000);
+        le_u32(&mut v, 1);
+        node(&mut v, 1, 1, 0, 1, 100, 1_000); // node 0, parent itself
+        let err = Profile::from_bytes(&v, &sample_map()).unwrap_err();
+        assert!(err.contains("cyclic parent chain"), "{err}");
+    }
+
+    #[test]
+    fn rejects_kind_mismatch() {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"BPRF");
+        le_u32(&mut v, 1);
+        le_u32(&mut v, 0);
+        le_u64(&mut v, 1_000);
+        le_u32(&mut v, 1);
+        node(&mut v, 2, 1, u32::MAX, 1, 100, 1_000); // kind 2 (Line) but map id 1 is "P"
+        let err = Profile::from_bytes(&v, &sample_map()).unwrap_err();
+        assert!(err.contains("kind does not match map entry"), "{err}");
     }
 
     #[test]
