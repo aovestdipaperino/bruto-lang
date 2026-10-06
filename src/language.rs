@@ -12,6 +12,115 @@ pub struct BuildResult {
     pub source_path: String,
     /// Path to the console output capture file (program writes here via compiled-in code).
     pub console_capture_path: String,
+    /// Path to a `.s` text assembly listing of the compiled module, for
+    /// the IDE's Disassembly window. `None` if the language's build
+    /// doesn't produce one, or emission failed for this target.
+    pub asm_path: Option<String>,
+}
+
+/// Whether a build carries debug info (for the debugger) or is an
+/// optimized release binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BuildProfile {
+    /// DWARF debug info, no optimization — what lldb needs.
+    #[default]
+    Debug,
+    /// No debug info, optimized according to [`OptimizeFor`].
+    Retail,
+}
+
+/// Optimization goal for a [`BuildProfile::Retail`] build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OptimizeFor {
+    /// Smallest code (`-Os`).
+    Size,
+    /// Balanced size / speed (`-O2`).
+    #[default]
+    Both,
+    /// Fastest code (`-O3`).
+    Speed,
+}
+
+/// Compilation options chosen in the IDE's Build Options dialog (or
+/// on the command line) and passed through to the language's build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BuildOptions {
+    pub profile: BuildProfile,
+    pub optimize: OptimizeFor,
+}
+
+impl BuildOptions {
+    /// True when the build should emit DWARF debug info.
+    pub fn debug_info(&self) -> bool {
+        self.profile == BuildProfile::Debug
+    }
+
+    /// LLVM new-pass-manager pipeline to run, or `None` for an
+    /// unoptimized (Debug) build. Debug builds ignore `optimize` so
+    /// variables stay inspectable and stepping follows the source.
+    pub fn pass_pipeline(&self) -> Option<&'static str> {
+        match self.profile {
+            BuildProfile::Debug => None,
+            BuildProfile::Retail => Some(match self.optimize {
+                OptimizeFor::Size => "default<Os>",
+                OptimizeFor::Both => "default<O2>",
+                OptimizeFor::Speed => "default<O3>",
+            }),
+        }
+    }
+
+    /// Same options with the profile forced to Debug — used when the
+    /// debugger needs a build regardless of the user's selection.
+    pub fn for_debugging(self) -> Self {
+        Self {
+            profile: BuildProfile::Debug,
+            ..self
+        }
+    }
+
+    /// Short human-readable description, e.g. `"Retail, optimized for speed"`.
+    pub fn describe(&self) -> String {
+        match self.profile {
+            BuildProfile::Debug => "Debug".to_string(),
+            BuildProfile::Retail => format!("Retail, optimized for {}", self.optimize.as_str()),
+        }
+    }
+}
+
+impl BuildProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BuildProfile::Debug => "debug",
+            BuildProfile::Retail => "retail",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "debug" => Some(BuildProfile::Debug),
+            "retail" | "release" => Some(BuildProfile::Retail),
+            _ => None,
+        }
+    }
+}
+
+impl OptimizeFor {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OptimizeFor::Size => "size",
+            OptimizeFor::Both => "both",
+            OptimizeFor::Speed => "speed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "size" => Some(OptimizeFor::Size),
+            "both" => Some(OptimizeFor::Both),
+            "speed" => Some(OptimizeFor::Speed),
+            _ => None,
+        }
+    }
 }
 
 /// Status reported by [`BuildJob::poll`] each tick of the IDE's
@@ -69,6 +178,18 @@ pub trait Language {
         self.build_job(source)
     }
 
+    /// Like [`build_job_at`] but honouring the user's [`BuildOptions`].
+    /// Languages without optimization / debug-info control can keep the
+    /// default, which ignores the options.
+    fn build_job_with(
+        &self,
+        source: &str,
+        source_path: Option<&std::path::Path>,
+        _options: &BuildOptions,
+    ) -> Box<dyn BuildJob> {
+        self.build_job_at(source, source_path)
+    }
+
     /// Convenience: drive `build_job` to completion synchronously.
     /// Used by callers that don't want progress info (CLI mode).
     fn build(&self, source: &str) -> Result<BuildResult, String> {
@@ -89,5 +210,55 @@ pub trait Language {
     fn valid_breakpoint_lines(&self, source: &str) -> std::collections::HashSet<usize> {
         let _ = source;
         (1..=source.lines().count()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_build_has_debug_info_and_no_passes() {
+        let o = BuildOptions {
+            profile: BuildProfile::Debug,
+            optimize: OptimizeFor::Speed,
+        };
+        assert!(o.debug_info());
+        assert_eq!(o.pass_pipeline(), None);
+    }
+
+    #[test]
+    fn retail_build_maps_optimize_goal_to_pipeline() {
+        let mk = |optimize| BuildOptions {
+            profile: BuildProfile::Retail,
+            optimize,
+        };
+        assert!(!mk(OptimizeFor::Both).debug_info());
+        assert_eq!(mk(OptimizeFor::Size).pass_pipeline(), Some("default<Os>"));
+        assert_eq!(mk(OptimizeFor::Both).pass_pipeline(), Some("default<O2>"));
+        assert_eq!(mk(OptimizeFor::Speed).pass_pipeline(), Some("default<O3>"));
+    }
+
+    #[test]
+    fn for_debugging_keeps_optimize_but_forces_debug() {
+        let o = BuildOptions {
+            profile: BuildProfile::Retail,
+            optimize: OptimizeFor::Size,
+        }
+        .for_debugging();
+        assert_eq!(o.profile, BuildProfile::Debug);
+        assert_eq!(o.optimize, OptimizeFor::Size);
+    }
+
+    #[test]
+    fn parse_round_trips() {
+        for p in [BuildProfile::Debug, BuildProfile::Retail] {
+            assert_eq!(BuildProfile::parse(p.as_str()), Some(p));
+        }
+        for o in [OptimizeFor::Size, OptimizeFor::Both, OptimizeFor::Speed] {
+            assert_eq!(OptimizeFor::parse(o.as_str()), Some(o));
+        }
+        assert_eq!(BuildProfile::parse("Release"), Some(BuildProfile::Retail));
+        assert_eq!(OptimizeFor::parse("fast"), None);
     }
 }
