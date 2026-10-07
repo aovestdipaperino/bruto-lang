@@ -52,12 +52,24 @@ pub enum OptimizeFor {
 pub struct BuildOptions {
     pub profile: BuildProfile,
     pub optimize: OptimizeFor,
+    /// Obfuscate the generated code (rename identifiers and obscure
+    /// control flow). Only takes effect for Retail builds.
+    pub obfuscate: bool,
 }
 
 impl BuildOptions {
     /// True when the build should emit DWARF debug info.
     pub fn debug_info(&self) -> bool {
         self.profile == BuildProfile::Debug
+    }
+
+    /// True when the obfuscation passes should run. Obfuscation applies to
+    /// any profile when requested: the identifier rename is source-neutral,
+    /// and the bogus-control-flow pass annotates its synthetic instructions
+    /// with a line-0 debug location so a Debug build's disassembly stays
+    /// aligned to the real Pascal lines.
+    pub fn obfuscation_enabled(&self) -> bool {
+        self.obfuscate
     }
 
     /// LLVM new-pass-manager pipeline to run, or `None` for an
@@ -85,9 +97,14 @@ impl BuildOptions {
 
     /// Short human-readable description, e.g. `"Retail, optimized for speed"`.
     pub fn describe(&self) -> String {
-        match self.profile {
+        let base = match self.profile {
             BuildProfile::Debug => "Debug".to_string(),
             BuildProfile::Retail => format!("Retail, optimized for {}", self.optimize.as_str()),
+        };
+        if self.obfuscation_enabled() {
+            format!("{base}, obfuscated")
+        } else {
+            base
         }
     }
 }
@@ -257,6 +274,7 @@ mod tests {
         let o = BuildOptions {
             profile: BuildProfile::Debug,
             optimize: OptimizeFor::Speed,
+            obfuscate: false,
         };
         assert!(o.debug_info());
         assert_eq!(o.pass_pipeline(), None);
@@ -267,6 +285,7 @@ mod tests {
         let mk = |optimize| BuildOptions {
             profile: BuildProfile::Retail,
             optimize,
+            obfuscate: false,
         };
         assert!(!mk(OptimizeFor::Both).debug_info());
         assert_eq!(mk(OptimizeFor::Size).pass_pipeline(), Some("default<Os>"));
@@ -279,6 +298,7 @@ mod tests {
         let o = BuildOptions {
             profile: BuildProfile::Retail,
             optimize: OptimizeFor::Size,
+            obfuscate: false,
         }
         .for_debugging();
         assert_eq!(o.profile, BuildProfile::Debug);
@@ -295,5 +315,43 @@ mod tests {
         }
         assert_eq!(BuildProfile::parse("Release"), Some(BuildProfile::Retail));
         assert_eq!(OptimizeFor::parse("fast"), None);
+    }
+
+    #[test]
+    fn obfuscation_enabled_follows_the_flag_for_any_profile() {
+        // The rename pass is source-neutral and BCF annotates its synthetic
+        // instructions with a line-0 location, so obfuscation is valid on
+        // Debug builds too — it tracks the flag, not the profile.
+        for profile in [BuildProfile::Debug, BuildProfile::Retail] {
+            let on = BuildOptions {
+                profile,
+                optimize: OptimizeFor::Both,
+                obfuscate: true,
+            };
+            assert!(on.obfuscation_enabled());
+
+            let off = BuildOptions {
+                profile,
+                optimize: OptimizeFor::Both,
+                obfuscate: false,
+            };
+            assert!(!off.obfuscation_enabled());
+        }
+    }
+
+    #[test]
+    fn describe_mentions_obfuscation() {
+        let o = BuildOptions {
+            profile: BuildProfile::Retail,
+            optimize: OptimizeFor::Speed,
+            obfuscate: true,
+        };
+        assert!(o.describe().contains("obfuscated"));
+        let plain = BuildOptions {
+            profile: BuildProfile::Retail,
+            optimize: OptimizeFor::Speed,
+            obfuscate: false,
+        };
+        assert!(!plain.describe().contains("obfuscated"));
     }
 }
