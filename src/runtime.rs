@@ -126,8 +126,8 @@ pub fn emit_runtime<'ctx>(context: &'ctx Context, module: &Module<'ctx>) {
         let b = context.create_builder();
         b.position_at_end(bb);
         let val = func.get_first_param().unwrap().into_int_value();
-        let true_s = b.build_global_string_ptr("true", "true_s").unwrap();
-        let false_s = b.build_global_string_ptr("false", "false_s").unwrap();
+        let true_s = b.build_global_string_ptr("TRUE", "true_s").unwrap();
+        let false_s = b.build_global_string_ptr("FALSE", "false_s").unwrap();
         let sel = b
             .build_select(
                 val,
@@ -268,8 +268,8 @@ pub fn emit_runtime<'ctx>(context: &'ctx Context, module: &Module<'ctx>) {
 
         b.position_at_end(write_bb);
         let val = func.get_first_param().unwrap().into_int_value();
-        let true_s = b.build_global_string_ptr("true", "cap_true").unwrap();
-        let false_s = b.build_global_string_ptr("false", "cap_false").unwrap();
+        let true_s = b.build_global_string_ptr("TRUE", "cap_true").unwrap();
+        let false_s = b.build_global_string_ptr("FALSE", "cap_false").unwrap();
         let sel = b
             .build_select(
                 val,
