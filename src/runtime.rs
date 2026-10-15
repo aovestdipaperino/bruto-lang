@@ -491,6 +491,19 @@ pub fn emit_runtime<'ctx>(context: &'ctx Context, module: &Module<'ctx>) {
         b.position_at_end(bb);
         let a = func.get_nth_param(0).unwrap().into_pointer_value();
         let bv = func.get_nth_param(1).unwrap().into_pointer_value();
+        // A nil string (a variable never assigned) is empty.
+        let empty = b
+            .build_global_string_ptr("", "empty_str")
+            .unwrap()
+            .as_pointer_value();
+        let a = b
+            .build_select(b.build_is_null(a, "a_nil").unwrap(), empty, a, "a")
+            .unwrap()
+            .into_pointer_value();
+        let bv = b
+            .build_select(b.build_is_null(bv, "b_nil").unwrap(), empty, bv, "b")
+            .unwrap()
+            .into_pointer_value();
         let strcmp = module.get_function("strcmp").unwrap();
         let r = b
             .build_call(strcmp, &[a.into(), bv.into()], "cmp")
@@ -515,7 +528,9 @@ pub fn emit_runtime<'ctx>(context: &'ctx Context, module: &Module<'ctx>) {
     module.add_function("atoll", atoll_ty, None);
 
     // bruto_str_copy(s: ptr, index: i64, count: i64) -> ptr
-    // copy(s, index, count) — 1-based index
+    // copy(s, index, count) — 1-based index. As in FPC, an index below 1
+    // counts as 1, and the count is cut to what the string holds (a nil
+    // string is empty).
     {
         let fn_ty = ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), i64_ty.into()], false);
         let func = module.add_function("bruto_str_copy", fn_ty, None);
@@ -525,14 +540,47 @@ pub fn emit_runtime<'ctx>(context: &'ctx Context, module: &Module<'ctx>) {
         let s = func.get_nth_param(0).unwrap().into_pointer_value();
         let index = func.get_nth_param(1).unwrap().into_int_value();
         let count = func.get_nth_param(2).unwrap().into_int_value();
-        // start = index - 1
-        let start = b
-            .build_int_sub(index, i64_ty.const_int(1, false), "start")
-            .unwrap();
-        // allocate count+1 bytes
-        let buf_size = b
-            .build_int_add(count, i64_ty.const_int(1, false), "bsz")
-            .unwrap();
+        let zero = i64_ty.const_zero();
+        let one = i64_ty.const_int(1, false);
+        let empty = b
+            .build_global_string_ptr("", "copy_empty")
+            .unwrap()
+            .as_pointer_value();
+        let s = b
+            .build_select(b.build_is_null(s, "nil").unwrap(), empty, s, "s")
+            .unwrap()
+            .into_pointer_value();
+        let strlen = module.get_function("strlen").unwrap_or_else(|| {
+            module.add_function("strlen", i64_ty.fn_type(&[ptr_ty.into()], false), None)
+        });
+        let len = b
+            .build_call(strlen, &[s.into()], "len")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+        let max = |b: &inkwell::builder::Builder<'ctx>, x, y, name| {
+            let gt = b
+                .build_int_compare(inkwell::IntPredicate::SGT, x, y, name)
+                .unwrap();
+            b.build_select(gt, x, y, name).unwrap().into_int_value()
+        };
+        let min = |b: &inkwell::builder::Builder<'ctx>, x, y, name| {
+            let lt = b
+                .build_int_compare(inkwell::IntPredicate::SLT, x, y, name)
+                .unwrap();
+            b.build_select(lt, x, y, name).unwrap().into_int_value()
+        };
+        // start = clamp(index - 1, 0, len)
+        let start = b.build_int_sub(index, one, "start").unwrap();
+        let start = max(&b, start, zero, "start_lo");
+        let start = min(&b, start, len, "start_hi");
+        // count = clamp(count, 0, len - start)
+        let room = b.build_int_sub(len, start, "room").unwrap();
+        let count = max(&b, count, zero, "count_lo");
+        let count = min(&b, count, room, "count_hi");
+        let buf_size = b.build_int_add(count, one, "bsz").unwrap();
         let malloc = module.get_function("malloc").unwrap();
         let buf = b
             .build_call(malloc, &[buf_size.into()], "buf")
@@ -541,7 +589,6 @@ pub fn emit_runtime<'ctx>(context: &'ctx Context, module: &Module<'ctx>) {
             .basic()
             .unwrap()
             .into_pointer_value();
-        // src = s + start
         let src = unsafe {
             b.build_in_bounds_gep(context.i8_type(), s, &[start], "src")
                 .unwrap()
@@ -549,7 +596,6 @@ pub fn emit_runtime<'ctx>(context: &'ctx Context, module: &Module<'ctx>) {
         let memcpy = module.get_function("memcpy").unwrap();
         b.build_call(memcpy, &[buf.into(), src.into(), count.into()], "")
             .unwrap();
-        // null-terminate: buf[count] = 0
         let end = unsafe {
             b.build_in_bounds_gep(context.i8_type(), buf, &[count], "end")
                 .unwrap()
