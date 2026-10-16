@@ -246,6 +246,20 @@ pub trait Language {
         crate::profile::Profile::load(p, m)
     }
 
+    /// Compile `source` (read from `source_path`, which finds the modules
+    /// it uses) without linking or running it, as Turbo Pascal's Compile
+    /// (Alt-F9) does: a library is checked on its own. `Ok` with a short
+    /// summary, `Err` with the first error; `None` when the language
+    /// can't. Default: `None`.
+    fn check_at(
+        &self,
+        source: &str,
+        source_path: Option<&std::path::Path>,
+    ) -> Option<Result<String, String>> {
+        let _ = (source, source_path);
+        None
+    }
+
     /// The name of the library module (a Pascal unit) `source` is, or
     /// `None` for a program. Building, running, debugging or profiling a
     /// window holding a library works on an open program instead.
