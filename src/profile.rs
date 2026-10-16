@@ -27,6 +27,9 @@ pub struct ProfileNode {
     pub name: String,
     /// 1-based source line (the header line for routines).
     pub line: usize,
+    /// The file `line` is in, when it isn't the program's own source (a
+    /// unit's, an include file's).
+    pub file: Option<String>,
     /// Index into `Profile::nodes`; `None` for the root's children.
     pub parent: Option<usize>,
     pub calls: u64,
@@ -48,6 +51,8 @@ pub struct Profile {
 pub struct MapEntry {
     pub kind: ProfileKind,
     pub line: usize,
+    /// The file of `line`, when it isn't the program's own source.
+    pub file: Option<String>,
     pub name: String,
 }
 
@@ -69,12 +74,25 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 
 impl Profile {
     /// Parse the map file: lines `P <id> <line> <name>` for routines and
-    /// `L <id> <line> <col>` for statements. Blank lines are ignored.
+    /// `L <id> <line> <col>` for statements. A line in another file than
+    /// the program's (a unit's) is written `<line>:<n>`, `n` naming the
+    /// file in an earlier `F <n> <path>` line. Blank lines are ignored.
     pub fn read_map(text: &str) -> Result<ProfMap, String> {
         let mut map = ProfMap::default();
+        let mut files: HashMap<u32, String> = HashMap::new();
         for (n, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("F ") {
+                let (num, path) = rest
+                    .split_once(' ')
+                    .ok_or_else(|| format!("prof map line {}: bad file entry", n + 1))?;
+                let num: u32 = num
+                    .parse()
+                    .map_err(|_| format!("prof map line {}: bad file number", n + 1))?;
+                files.insert(num, path.to_string());
                 continue;
             }
             let mut parts = line.splitn(4, ' ');
@@ -83,20 +101,32 @@ impl Profile {
                 .next()
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| format!("prof map line {}: bad id", n + 1))?;
-            let src_line: usize = parts
-                .next()
-                .and_then(|s| s.parse().ok())
-                .ok_or_else(|| format!("prof map line {}: bad line number", n + 1))?;
+            let bad_line = || format!("prof map line {}: bad line number", n + 1);
+            let token = parts.next().ok_or_else(bad_line)?;
+            let (src_line, file) = match token.split_once(':') {
+                Some((l, f)) => {
+                    let l: usize = l.parse().map_err(|_| bad_line())?;
+                    let f: u32 = f.parse().map_err(|_| bad_line())?;
+                    let path = files
+                        .get(&f)
+                        .cloned()
+                        .ok_or_else(|| format!("prof map line {}: unknown file {f}", n + 1))?;
+                    (l, Some(path))
+                }
+                None => (token.parse().map_err(|_| bad_line())?, None),
+            };
             let rest = parts.next().unwrap_or("");
             let entry = match kind {
                 "P" => MapEntry {
                     kind: ProfileKind::Routine,
                     line: src_line,
+                    file,
                     name: rest.to_string(),
                 },
                 "L" => MapEntry {
                     kind: ProfileKind::Line,
                     line: src_line,
+                    file,
                     name: String::new(),
                 },
                 other => return Err(format!("prof map line {}: unknown kind {other:?}", n + 1)),
@@ -162,6 +192,7 @@ impl Profile {
                 kind,
                 name: entry.name.clone(),
                 line: entry.line,
+                file: entry.file.clone(),
                 parent,
                 calls,
                 self_ns,
@@ -204,12 +235,13 @@ impl Profile {
         Self::from_bytes(&bytes, &map)
     }
 
-    /// Per-line `(self_ns, hits)` summed over every calling context.
-    /// This is what the editor's heat column shows.
+    /// Per-line `(self_ns, hits)` of the program's own source, summed
+    /// over every calling context. This is what the editor's heat column
+    /// shows.
     pub fn line_totals(&self) -> HashMap<usize, (u64, u64)> {
         let mut out: HashMap<usize, (u64, u64)> = HashMap::new();
         for n in &self.nodes {
-            if n.kind == ProfileKind::Line {
+            if n.kind == ProfileKind::Line && n.file.is_none() {
                 let e = out.entry(n.line).or_insert((0, 0));
                 e.0 += n.self_ns;
                 e.1 += n.calls;
@@ -358,6 +390,22 @@ mod tests {
         node(&mut v, 2, 1, u32::MAX, 1, 100, 1_000); // kind 2 (Line) but map id 1 is "P"
         let err = Profile::from_bytes(&v, &sample_map()).unwrap_err();
         assert!(err.contains("kind does not match map entry"), "{err}");
+    }
+
+    #[test]
+    fn map_entries_name_their_unit_files() {
+        let map = Profile::read_map(
+            "P 1 3 program\nF 1 /src/my unit.pas\nP 2 5:1 Twice\nL 3 10:1 5\nL 4 7 3\n",
+        )
+        .unwrap();
+        assert_eq!(map.entries[&1].file, None);
+        assert_eq!(map.entries[&2].file.as_deref(), Some("/src/my unit.pas"));
+        assert_eq!(map.entries[&2].line, 5);
+        assert_eq!(map.entries[&2].name, "Twice");
+        assert_eq!(map.entries[&3].line, 10);
+        assert_eq!(map.entries[&3].file.as_deref(), Some("/src/my unit.pas"));
+        assert_eq!(map.entries[&4].file, None);
+        assert!(Profile::read_map("L 1 4:9 2\n").is_err(), "unknown file");
     }
 
     #[test]

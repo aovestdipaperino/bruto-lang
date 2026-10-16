@@ -246,6 +246,22 @@ pub trait Language {
         crate::profile::Profile::load(p, m)
     }
 
+    /// The name of the library module (a Pascal unit) `source` is, or
+    /// `None` for a program. Building, running, debugging or profiling a
+    /// window holding a library works on an open program instead.
+    /// Default: every source is a program.
+    fn library_name(&self, source: &str) -> Option<String> {
+        let _ = source;
+        None
+    }
+
+    /// The library modules `source` uses (lower-case), so the IDE can
+    /// prefer the program that uses a library. Default: none.
+    fn used_libraries(&self, source: &str) -> Vec<String> {
+        let _ = source;
+        Vec::new()
+    }
+
     /// Return the set of 1-based line numbers where a breakpoint can validly
     /// be set (lines that produce executable code).  Used after a successful
     /// build to snap user-placed breakpoints to the nearest valid line.
